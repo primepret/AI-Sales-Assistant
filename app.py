@@ -1063,6 +1063,7 @@ if is_administrator():
                 st.success("Brand logo updated. Refreshing...")
                 st.rerun()
 
+if st.session_state.get("user_role") in ("Administrator", "Store Manager"):
     with st.sidebar.expander("Change password"):
         with st.form("change_password_form"):
             current_password = st.text_input("Current password", type="password")
