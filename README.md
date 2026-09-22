@@ -28,7 +28,7 @@ Products, sales, inventory stock, and expenses are also stored in `accounts.db`.
 
 Each account has an isolated workspace. The four cashier accounts are `cashier1`, `cashier2`, `cashier3`, and `cashier4`; each account sees and stores its own products, inventory, sales, and expenses.
 
-Administrators and Store Managers can open **Cashier Management** to review every cashier's records and update cashier usernames and passwords. Renaming a cashier preserves that cashier's existing data.
+Administrators and Store Managers can open **Add Cashier** to create cashier accounts. They can use **Cashier Management** to review every cashier's records and update cashier usernames and passwords. Renaming a cashier preserves that cashier's existing data.
 
 ## Mobile and APK
 

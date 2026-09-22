@@ -242,7 +242,7 @@ if "shortcut_bindings" not in st.session_state:
 
 VALID_ACCOUNTS = {
     "admin": {"password": "admin123", "role": "Administrator", "access": ["all"]},
-    "manager": {"password": "manager123", "role": "Store Manager", "access": ["🏠 Dashboard", "🛒 POS", "📦 Products", "📊 Sales", "🤖 AI Manager", "👥 Cashier Management"]},
+    "manager": {"password": "manager123", "role": "Store Manager", "access": ["🏠 Dashboard", "🛒 POS", "📦 Products", "📊 Sales", "🤖 AI Manager", "👥 Cashier Management", "➕ Add Cashier"]},
     "cashier1": {"password": "cashier123", "role": "Cashier", "access": ["🏠 Dashboard", "🛒 POS", "📊 Sales"]},
     "cashier2": {"password": "cashier234", "role": "Cashier", "access": ["🏠 Dashboard", "🛒 POS", "📊 Sales"]},
     "cashier3": {"password": "cashier345", "role": "Cashier", "access": ["🏠 Dashboard", "🛒 POS", "📊 Sales"]},
@@ -318,6 +318,34 @@ def get_cashier_accounts():
         return connection.execute(
             "SELECT username, role FROM accounts WHERE role = 'Cashier' ORDER BY username"
         ).fetchall()
+
+
+def create_cashier_account(username: str, password: str, confirm_password: str):
+    cleaned_username = (username or "").strip().lower()
+    if not cleaned_username:
+        return False, "Username cannot be empty."
+    if len(password) < 8:
+        return False, "Password must be at least 8 characters."
+    if password != confirm_password:
+        return False, "Passwords do not match."
+
+    with sqlite3.connect(ACCOUNT_DB) as connection:
+        existing = connection.execute(
+            "SELECT username FROM accounts WHERE username = ?",
+            (cleaned_username,),
+        ).fetchone()
+        if existing:
+            return False, "That username is already in use."
+
+        salt, password_hash = hash_password(password)
+        connection.execute(
+            """
+            INSERT INTO accounts (username, password_hash, salt, role, access)
+            VALUES (?, ?, ?, 'Cashier', ?)
+            """,
+            (cleaned_username, password_hash, salt, json.dumps(["🏠 Dashboard", "🛒 POS", "📊 Sales"])),
+        )
+    return True, cleaned_username
 
 
 def update_cashier_credentials(current_username: str, new_username: str, new_password: str):
@@ -492,7 +520,8 @@ def authenticate_user(username: str, password: str):
 
 
 def get_allowed_pages():
-    user_access = st.session_state.get("user_access", [])
+    user_access = list(st.session_state.get("user_access", []))
+    user_role = st.session_state.get("user_role")
     all_pages = [
         "🏠 Dashboard",
         "🛒 POS",
@@ -503,7 +532,10 @@ def get_allowed_pages():
         "💸 Expenses",
         "🤖 AI Manager",
         "👥 Cashier Management",
+        "➕ Add Cashier",
     ]
+    if user_role in ("Administrator", "Store Manager") and "➕ Add Cashier" not in user_access:
+        user_access.append("➕ Add Cashier")
     if "all" in user_access:
         return all_pages
     if not user_access:
@@ -1633,6 +1665,32 @@ elif page == "💸 Expenses":
     )
 
 # -----------------------------
+# ADD CASHIER
+# -----------------------------
+
+elif page == "➕ Add Cashier":
+
+    st.title("➕ Add Cashier")
+    st.write("Create a new cashier account for your store.")
+
+    with st.form("add_cashier_page_form"):
+        new_cashier_username = st.text_input("Username")
+        new_cashier_password = st.text_input("Password", type="password")
+        confirm_cashier_password = st.text_input("Confirm password", type="password")
+        add_cashier = st.form_submit_button("Add cashier")
+
+        if add_cashier:
+            created, message = create_cashier_account(
+                new_cashier_username,
+                new_cashier_password,
+                confirm_cashier_password,
+            )
+            if created:
+                st.success(f"Cashier account '{message}' created.")
+                st.rerun()
+            else:
+                st.error(message)
+
 # CASHIER MANAGEMENT
 # -----------------------------
 
