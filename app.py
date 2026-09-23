@@ -698,14 +698,14 @@ def authenticate_user(username: str, password: str):
     account = get_account(cleaned_username)
     if not account:
         return None
-        username, password_hash, salt, role, access_json, employee_code = account
+    username, password_hash, salt, role, access_json, employee_code = account
     if not verify_password(password or "", salt, password_hash):
         return None
     return {
         "username": username,
         "role": role,
         "access": json.loads(access_json),
-            "employee_code": employee_code,
+        "employee_code": employee_code,
     }
 
 
