@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        body { margin: 0; font-family: sans-serif; color: #f1deba; background: transparent; }
+        button { padding: 10px 14px; border: 1px solid #d8b36a; border-radius: 8px; cursor: pointer; background: #17110d; color: #f1deba; font-weight: 700; }
+        button:disabled { cursor: not-allowed; opacity: 0.6; }
+        #voiceStatus { margin-top: 8px; font-size: 14px; }
+    </style>
+</head>
+<body>
+    <button id="voiceStart" type="button">Start Voice Input</button>
+    <div id="voiceStatus">Ready for voice input.</div>
+    <script>
+        const button = document.getElementById("voiceStart");
+        const status = document.getElementById("voiceStatus");
+        const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+
+        function sendValue(value) {
+            window.parent.postMessage({
+                isStreamlitMessage: true,
+                type: "streamlit:setComponentValue",
+                value: value
+            }, "*");
+        }
+
+        function setHeight() {
+            window.parent.postMessage({
+                isStreamlitMessage: true,
+                type: "streamlit:setFrameHeight",
+                height: document.body.scrollHeight
+            }, "*");
+        }
+
+        window.parent.postMessage({
+            isStreamlitMessage: true,
+            type: "streamlit:componentReady",
+            apiVersion: 1
+        }, "*");
+        setHeight();
+
+        if (!SpeechRecognition) {
+            button.disabled = true;
+            status.textContent = "Voice input is not supported in this browser. Try Chrome or Edge.";
+        } else if (!window.isSecureContext && window.location.hostname !== "localhost") {
+            button.disabled = true;
+            status.textContent = "Voice input needs an HTTPS connection on mobile.";
+        } else {
+            const recognition = new SpeechRecognition();
+            recognition.lang = "en-US";
+            recognition.interimResults = false;
+            recognition.continuous = false;
+
+            recognition.onstart = () => {
+                button.disabled = true;
+                status.textContent = "Listening... speak now.";
+            };
+            recognition.onresult = (event) => {
+                const transcript = event.results[0][0].transcript.trim();
+                status.textContent = transcript || "No speech detected. Try again.";
+                if (transcript) sendValue(transcript);
+                button.disabled = false;
+            };
+            recognition.onerror = (event) => {
+                const message = event.error === "not-allowed"
+                    ? "Microphone permission was denied. Allow microphone access and try again."
+                    : `Voice input failed (${event.error}). Try again or type your prompt.`;
+                status.textContent = message;
+                button.disabled = false;
+            };
+            recognition.onend = () => {
+                button.disabled = false;
+            };
+            button.addEventListener("click", () => {
+                try {
+                    recognition.start();
+                } catch (error) {
+                    status.textContent = "Voice input is already starting. Try again in a moment.";
+                    button.disabled = false;
+                }
+            });
+        }
+    </script>
+</body>
+</html>
