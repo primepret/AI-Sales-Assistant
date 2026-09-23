@@ -5,13 +5,18 @@ import json
 import secrets
 import sqlite3
 from pathlib import Path
-from datetime import date
+from datetime import date, datetime, timezone
+from urllib.parse import quote
 
 import pandas as pd
 import streamlit as st
 
 APP_DIR = Path(__file__).resolve().parent
 ACCOUNT_DB = APP_DIR / "accounts.db"
+VOICE_INPUT_COMPONENT = st.components.v1.declare_component(
+    "prime_pret_voice_input",
+    path=str(APP_DIR / "voice_input_component"),
+)
 
 try:
     from openai import OpenAI
@@ -24,7 +29,28 @@ try:
 except ImportError:  # pragma: no cover
     pass
 
-LIVE_AI_ENABLED = bool(os.getenv("OPENAI_API_KEY")) and OpenAI is not None
+
+def get_openai_api_key():
+    environment_key = os.getenv("OPENAI_API_KEY", "").strip()
+    if environment_key:
+        return environment_key
+    try:
+        return str(st.secrets.get("OPENAI_API_KEY", "")).strip()
+    except Exception:
+        return ""
+
+
+def get_openai_model():
+    environment_model = os.getenv("OPENAI_MODEL", "").strip()
+    if environment_model:
+        return environment_model
+    try:
+        return str(st.secrets.get("OPENAI_MODEL", "gpt-4o-mini")).strip()
+    except Exception:
+        return "gpt-4o-mini"
+
+
+LIVE_AI_ENABLED = bool(get_openai_api_key()) and OpenAI is not None
 AI_FEATURES = {
     "Business insights": True,
     "Product descriptions": True,
@@ -142,6 +168,9 @@ st.markdown(
         .stAlert, .stInfo, .stSuccess, .stWarning {
             border-radius: 12px;
         }
+        .st-key-mobile-navigation {
+            display: none;
+        }
         @media (max-width: 768px) {
             .main .block-container {
                 padding: 0.75rem 0.65rem 2rem;
@@ -188,6 +217,10 @@ st.markdown(
             }
             [data-testid="stDataFrame"] {
                 overflow-x: auto;
+            }
+            .st-key-mobile-navigation {
+                display: block;
+                margin-bottom: 1rem;
             }
             h1 {
                 font-size: 1.7rem !important;
@@ -320,6 +353,13 @@ def get_cashier_accounts():
         ).fetchall()
 
 
+def get_manager_accounts():
+    with sqlite3.connect(ACCOUNT_DB) as connection:
+        return connection.execute(
+            "SELECT username, role FROM accounts WHERE role = 'Store Manager' ORDER BY username"
+        ).fetchall()
+
+
 def create_cashier_account(username: str, password: str, confirm_password: str):
     cleaned_username = (username or "").strip().lower()
     if not cleaned_username:
@@ -344,6 +384,42 @@ def create_cashier_account(username: str, password: str, confirm_password: str):
             VALUES (?, ?, ?, 'Cashier', ?)
             """,
             (cleaned_username, password_hash, salt, json.dumps(["🏠 Dashboard", "🛒 POS", "📊 Sales"])),
+        )
+    return True, cleaned_username
+
+
+def create_manager_account(username: str, password: str, confirm_password: str):
+    cleaned_username = (username or "").strip().lower()
+    if not cleaned_username:
+        return False, "Username cannot be empty."
+    if len(password) < 8:
+        return False, "Password must be at least 8 characters."
+    if password != confirm_password:
+        return False, "Passwords do not match."
+
+    with sqlite3.connect(ACCOUNT_DB) as connection:
+        existing = connection.execute(
+            "SELECT username FROM accounts WHERE username = ?",
+            (cleaned_username,),
+        ).fetchone()
+        if existing:
+            return False, "That username is already in use."
+
+        salt, password_hash = hash_password(password)
+        connection.execute(
+            """
+            INSERT INTO accounts (username, password_hash, salt, role, access)
+            VALUES (?, ?, ?, 'Store Manager', ?)
+            """,
+            (cleaned_username, password_hash, salt, json.dumps([
+                "🏠 Dashboard",
+                "🛒 POS",
+                "📦 Products",
+                "📊 Sales",
+                "🤖 AI Manager",
+                "👥 Cashier Management",
+                "➕ Add Cashier",
+            ])),
         )
     return True, cleaned_username
 
@@ -437,6 +513,42 @@ def update_account_password(username: str, password: str):
         )
 
 
+def ensure_app_state_table():
+    with sqlite3.connect(ACCOUNT_DB) as connection:
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS app_state (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )
+            """
+        )
+
+
+def get_app_state_value(key: str, default=None):
+    with sqlite3.connect(ACCOUNT_DB) as connection:
+        row = connection.execute(
+            "SELECT value FROM app_state WHERE key = ?",
+            (key,),
+        ).fetchone()
+    return row[0] if row else default
+
+
+def set_app_state_value(key: str, value: str):
+    with sqlite3.connect(ACCOUNT_DB) as connection:
+        connection.execute(
+            "INSERT INTO app_state (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, str(value)),
+        )
+
+
+def set_business_data_refresh(owner: str):
+    if not owner:
+        return
+    timestamp = datetime.now(timezone.utc).isoformat()
+    set_app_state_value(f"business_data_updated:{owner}", timestamp)
+
+
 def save_business_data(owner: str | None = None):
     owner = owner or st.session_state.get("username")
     if not owner:
@@ -458,6 +570,7 @@ def save_business_data(owner: str | None = None):
                 "INSERT OR REPLACE INTO business_data_scoped (owner, name, payload) VALUES (?, ?, ?)",
                 (owner, name, payload),
             )
+    set_business_data_refresh(owner)
 
 
 def save_scoped_business_data(owner: str, data: dict[str, pd.DataFrame]):
@@ -468,6 +581,7 @@ def save_scoped_business_data(owner: str, data: dict[str, pd.DataFrame]):
                 "INSERT OR REPLACE INTO business_data_scoped (owner, name, payload) VALUES (?, ?, ?)",
                 (owner, name, payload),
             )
+    set_business_data_refresh(owner)
 
 
 def load_business_data(owner: str):
@@ -497,9 +611,34 @@ def load_business_data(owner: str):
             except ValueError:
                 pass
     normalize_product_image_paths(st.session_state.products)
+    st.session_state.business_data_last_updated = get_app_state_value(f"business_data_updated:{owner}", "")
+
+
+def auto_refresh_component(interval_seconds: int = 10):
+    if not st.session_state.get("authenticated"):
+        return
+    st.components.v1.html(
+        f"""
+        <script>
+            (() => {{
+                const intervalMs = {interval_seconds * 1000};
+                if (!window.__primePretAutoRefresh) {{
+                    window.__primePretAutoRefresh = true;
+                    setInterval(() => {{
+                        if (document.visibilityState === 'visible') {{
+                            window.location.reload();
+                        }}
+                    }}, intervalMs);
+                }}
+            }})();
+        </script>
+        """,
+        height=0,
+    )
 
 
 initialize_account_database()
+ensure_app_state_table()
 
 
 def authenticate_user(username: str, password: str):
@@ -532,8 +671,11 @@ def get_allowed_pages():
         "💸 Expenses",
         "🤖 AI Manager",
         "👥 Cashier Management",
+        "➕ Add Manager",
         "➕ Add Cashier",
     ]
+    if user_role == "Administrator" and "➕ Add Manager" not in user_access:
+        user_access.append("➕ Add Manager")
     if user_role in ("Administrator", "Store Manager") and "➕ Add Cashier" not in user_access:
         user_access.append("➕ Add Cashier")
     if "all" in user_access:
@@ -541,6 +683,10 @@ def get_allowed_pages():
     if not user_access:
         return ["🏠 Dashboard"]
     return [page for page in all_pages if page in user_access or page == "🏠 Dashboard"]
+
+
+def sync_mobile_page():
+    st.session_state.mobile_page = st.session_state.sidebar_page
 
 
 def is_administrator():
@@ -750,10 +896,11 @@ def build_rule_based_ai_response(prompt: str) -> str:
 
 
 def ask_business_ai(prompt: str) -> str:
-    api_key = os.getenv("OPENAI_API_KEY")
+    st.session_state.ai_error = ""
+    api_key = get_openai_api_key()
     if api_key and OpenAI is not None:
         try:
-            client = OpenAI(api_key=api_key)
+            client = OpenAI(api_key=api_key, timeout=30.0, max_retries=1)
             context = get_business_context()
             context_text = (
                 f"Revenue: PKR {context['revenue']:,.0f}\n"
@@ -769,7 +916,7 @@ def ask_business_ai(prompt: str) -> str:
                 )
 
             completion = client.chat.completions.create(
-                model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+                model=get_openai_model(),
                 messages=[
                     {
                         "role": "system",
@@ -789,8 +936,8 @@ def ask_business_ai(prompt: str) -> str:
             response = completion.choices[0].message.content
             if response:
                 return response.strip()
-        except Exception:
-            pass
+        except Exception as error:
+            st.session_state.ai_error = str(error)
 
     return build_rule_based_ai_response(prompt)
 
@@ -821,12 +968,12 @@ def generate_product_description(product: dict) -> str:
         f"Designed for a comfortable {size.lower()} fit, this piece blends elegance and everyday wearability."
     )
 
-    api_key = os.getenv("OPENAI_API_KEY")
+    api_key = get_openai_api_key()
     if api_key and OpenAI is not None:
         try:
             client = OpenAI(api_key=api_key)
             completion = client.chat.completions.create(
-                model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+                model=get_openai_model(),
                 messages=[
                     {
                         "role": "system",
@@ -889,11 +1036,37 @@ def generate_whatsapp_summary():
     forecast = forecast_sales_data()
     low_count = len(context["low_stock"]) if not context["low_stock"].empty else 0
     summary = (
-        f"Prime Pret business update: Revenue PKR {context['revenue']:,.0f}, Gross Profit PKR {context['profit']:,.0f}, "
-        f"Expenses PKR {context['expense_total']:,.0f}, Net Profit PKR {context['net_profit']:,.0f}. "
-        f"Low stock items: {low_count}. Forecast for next 7 days: PKR {forecast['forecast_revenue']:,.0f} with {forecast['trend']}."
+        "*Prime Pret Business Summary*\n"
+        f"Revenue: PKR {context['revenue']:,.0f}\n"
+        f"Gross profit: PKR {context['profit']:,.0f}\n"
+        f"Expenses: PKR {context['expense_total']:,.0f}\n"
+        f"Net profit: PKR {context['net_profit']:,.0f}\n"
+        f"Low stock items: {low_count}\n"
+        f"7-day forecast: PKR {forecast['forecast_revenue']:,.0f} ({forecast['trend']})"
     )
     return summary
+
+
+def render_whatsapp_summary(summary: str):
+    st.text_area(
+        "WhatsApp message",
+        value=summary,
+        height=190,
+        disabled=True,
+        help="Select and copy this message, or open it directly in WhatsApp.",
+    )
+    share_url = f"https://wa.me/?text={quote(summary)}"
+    share_col, download_col = st.columns(2)
+    with share_col:
+        st.link_button("Open in WhatsApp", share_url, use_container_width=True)
+    with download_col:
+        st.download_button(
+            "Download summary",
+            data=summary,
+            file_name="prime_pret_business_summary.txt",
+            mime="text/plain",
+            use_container_width=True,
+        )
 
 
 def export_dataframe_csv(df: pd.DataFrame, filename: str):
@@ -909,47 +1082,10 @@ def export_dataframe_csv(df: pd.DataFrame, filename: str):
 def voice_input_component():
     if "voice_prompt" not in st.session_state:
         st.session_state.voice_prompt = ""
+    if "ai_prompt" not in st.session_state:
+        st.session_state.ai_prompt = st.session_state.voice_prompt
 
-    component_value = st.components.v1.html(
-        """
-        <div style="display:flex; flex-direction:column; gap:8px; align-items:flex-start;">
-            <button id="voiceStart" style="padding:8px 14px; border-radius:8px; cursor:pointer;">🎙️ Start Voice Input</button>
-            <div id="voiceStatus" style="font-size:14px; color:#555;">Waiting for voice input...</div>
-        </div>
-        <script>
-            const button = document.getElementById('voiceStart');
-            const status = document.getElementById('voiceStatus');
-            const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-
-            function sendToStreamlit(value) {
-                window.parent.postMessage({
-                    type: 'streamlit:setComponentValue',
-                    value: value
-                }, '*');
-            }
-
-            if (!SpeechRecognition) {
-                status.textContent = 'Speech recognition is not supported in this browser.';
-            } else {
-                const recognition = new SpeechRecognition();
-                recognition.lang = 'en-US';
-                recognition.onresult = function(event) {
-                    const transcript = event.results[0][0].transcript;
-                    status.textContent = transcript;
-                    sendToStreamlit(transcript);
-                };
-                recognition.onerror = function() {
-                    status.textContent = 'Voice input failed. Please type your prompt manually.';
-                };
-                button.onclick = function() {
-                    status.textContent = 'Listening...';
-                    recognition.start();
-                };
-            }
-        </script>
-        """,
-        height=120,
-    )
+    component_value = VOICE_INPUT_COMPONENT(key="prime_pret_voice_input")
 
     if isinstance(component_value, str) and component_value.strip():
         st.session_state.voice_prompt = component_value.strip()
@@ -1024,9 +1160,13 @@ if not st.session_state.authenticated:
 
     st.stop()
 
-if st.session_state.get("business_data_owner") != st.session_state.username:
+current_refresh_token = get_app_state_value(f"business_data_updated:{st.session_state.username}", "")
+if st.session_state.get("business_data_owner") != st.session_state.username or st.session_state.get("business_data_last_updated") != current_refresh_token:
     load_business_data(st.session_state.username)
     st.session_state.business_data_owner = st.session_state.username
+    st.session_state.business_data_last_updated = current_refresh_token
+
+auto_refresh_component(10)
 
 # -----------------------------
 # SIDEBAR
@@ -1132,7 +1272,24 @@ if st.sidebar.button("Logout"):
     st.rerun()
 
 allowed_pages = get_allowed_pages()
-page = st.sidebar.radio("Menu", allowed_pages)
+page = st.sidebar.radio(
+    "Menu",
+    allowed_pages,
+    key="sidebar_page",
+    on_change=sync_mobile_page,
+)
+
+if "mobile_page" not in st.session_state or st.session_state.mobile_page not in allowed_pages:
+    st.session_state.mobile_page = page
+
+with st.container(key="mobile-navigation"):
+    st.markdown("#### Menu")
+    page = st.selectbox(
+        "Choose a page",
+        allowed_pages,
+        key="mobile_page",
+        label_visibility="collapsed",
+    )
 
 if page not in allowed_pages:
     page = "🏠 Dashboard"
@@ -1200,13 +1357,7 @@ if page == "🏠 Dashboard":
             f"Prime Pret POS update: Revenue PKR {revenue:,.0f}. "
             f"Inventory units: {stock:,.0f}. Low stock items: {reorder}."
         )
-    st.code(whatsapp_summary, language="text")
-    st.download_button(
-        "Download summary as text",
-        data=whatsapp_summary,
-        file_name="prime_pret_business_summary.txt",
-        mime="text/plain",
-    )
+    render_whatsapp_summary(whatsapp_summary)
 
     st.subheader("⚠️ Low Stock Alerts")
 
@@ -1665,6 +1816,33 @@ elif page == "💸 Expenses":
     )
 
 # -----------------------------
+# ADD MANAGER
+# -----------------------------
+
+elif page == "➕ Add Manager":
+
+    st.title("➕ Add Manager")
+    st.write("Create a new store manager account for your business.")
+
+    with st.form("add_manager_page_form"):
+        new_manager_username = st.text_input("Username")
+        new_manager_password = st.text_input("Password", type="password")
+        confirm_manager_password = st.text_input("Confirm password", type="password")
+        add_manager = st.form_submit_button("Add manager")
+
+        if add_manager:
+            created, message = create_manager_account(
+                new_manager_username,
+                new_manager_password,
+                confirm_manager_password,
+            )
+            if created:
+                st.success(f"Manager account '{message}' created.")
+                st.rerun()
+            else:
+                st.error(message)
+
+# -----------------------------
 # ADD CASHIER
 # -----------------------------
 
@@ -1872,25 +2050,32 @@ elif page == "🤖 AI Manager":
 
     st.divider()
 
-    prompt = st.text_input(
-        "Ask the AI manager",
-        value=st.session_state.voice_prompt,
-        placeholder="Example: Low stock report, sales summary, profit analysis, today expenses"
-    )
-
     st.write("#### 🎙️ Voice Input")
     voice_value = voice_input_component()
     if isinstance(voice_value, str) and voice_value.strip():
-        prompt = voice_value
         st.session_state.voice_prompt = voice_value
+        st.session_state.ai_prompt = voice_value
+
+    prompt = st.text_input(
+        "Ask the AI manager",
+        key="ai_prompt",
+        placeholder="Example: Low stock report, sales summary, profit analysis, today expenses",
+    )
 
     if st.button("Generate AI Insight") and prompt.strip():
         with st.spinner("Analyzing your business data..."):
             answer = ask_business_ai(prompt)
         st.success("AI insight ready")
         st.markdown(f"### Response\n{answer}")
+        if st.session_state.get("ai_error"):
+            st.warning(
+                "Live OpenAI request failed, so the built-in business response was used. "
+                f"Details: {st.session_state.ai_error}"
+            )
 
     if st.button("Generate WhatsApp Summary"):
-        st.code(generate_whatsapp_summary(), language="text")
+        st.session_state.whatsapp_summary = generate_whatsapp_summary()
+    if st.session_state.get("whatsapp_summary"):
+        render_whatsapp_summary(st.session_state.whatsapp_summary)
 
     st.caption("AI features use your sales, inventory, and expense data. Live OpenAI responses require OPENAI_API_KEY; all other features work locally.")
