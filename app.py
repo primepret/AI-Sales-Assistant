@@ -285,15 +285,15 @@ VALID_ACCOUNTS = {
     "cashier4": {"password": "cashier456", "role": "Cashier", "access": ["🏠 Dashboard", "🛒 POS", "📊 Sales"]},
 }
 
-def hash_password(password: str, salt: bytes | None = None):
-    salt = salt or secrets.token_bytes(16)
+def hash_password(password: str, provided_salt: bytes | None = None):
+    generated_salt = provided_salt or secrets.token_bytes(16)
     password_hash = hashlib.pbkdf2_hmac(
         "sha256",
         password.encode("utf-8"),
-        salt,
+        generated_salt,
         120_000,
     )
-    return salt.hex(), password_hash.hex()
+    return generated_salt.hex(), password_hash.hex()
 
 
 def verify_password(password: str, salt_hex: str, password_hash_hex: str):
