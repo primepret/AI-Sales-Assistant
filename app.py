@@ -249,6 +249,9 @@ if "authenticated" not in st.session_state:
 if "username" not in st.session_state:
     st.session_state.username = ""
 
+if "employee_code" not in st.session_state:
+    st.session_state.employee_code = ""
+
 if "user_role" not in st.session_state:
     st.session_state.user_role = ""
 
@@ -298,6 +301,17 @@ def verify_password(password: str, salt_hex: str, password_hash_hex: str):
     return secrets.compare_digest(candidate_hash, password_hash_hex)
 
 
+def create_employee_code(connection, role: str):
+    while True:
+        code = str(secrets.randbelow(900000) + 100000)
+        existing = connection.execute(
+            "SELECT 1 FROM accounts WHERE employee_code = ?",
+            (code,),
+        ).fetchone()
+        if not existing:
+            return code
+
+
 def initialize_account_database():
     with sqlite3.connect(ACCOUNT_DB) as connection:
         connection.execute(
@@ -307,10 +321,16 @@ def initialize_account_database():
                 password_hash TEXT NOT NULL,
                 salt TEXT NOT NULL,
                 role TEXT NOT NULL,
-                access TEXT NOT NULL
+                access TEXT NOT NULL,
+                employee_code TEXT UNIQUE
             )
             """
         )
+        account_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(accounts)")
+        }
+        if "employee_code" not in account_columns:
+            connection.execute("ALTER TABLE accounts ADD COLUMN employee_code TEXT")
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS business_data_scoped (
@@ -327,36 +347,52 @@ def initialize_account_database():
             connection.execute(
                 """
                 INSERT OR IGNORE INTO accounts
-                (username, password_hash, salt, role, access)
-                VALUES (?, ?, ?, ?, ?)
+                (username, password_hash, salt, role, access, employee_code)
+                VALUES (?, ?, ?, ?, ?, ?)
                 """,
-                (username, password_hash, salt, account["role"], json.dumps(account["access"])),
+                (
+                    username,
+                    password_hash,
+                    salt,
+                    account["role"],
+                    json.dumps(account["access"]),
+                    create_employee_code(connection, account["role"]),
+                ),
             )
             connection.execute(
                 "UPDATE accounts SET role = ?, access = ? WHERE username = ?",
                 (account["role"], json.dumps(account["access"]), username),
             )
+        for username, role, employee_code in connection.execute(
+            "SELECT username, role, employee_code FROM accounts"
+        ).fetchall():
+            if not employee_code or not employee_code.isdigit():
+                connection.execute(
+                    "UPDATE accounts SET employee_code = ? WHERE username = ?",
+                    (create_employee_code(connection, role), username),
+                )
 
 
 def get_account(username: str):
     with sqlite3.connect(ACCOUNT_DB) as connection:
         return connection.execute(
-            "SELECT username, password_hash, salt, role, access FROM accounts WHERE username = ?",
-            (username,),
+            "SELECT username, password_hash, salt, role, access, employee_code FROM accounts "
+            "WHERE username = ? OR employee_code = ?",
+            (username, username.upper()),
         ).fetchone()
 
 
 def get_cashier_accounts():
     with sqlite3.connect(ACCOUNT_DB) as connection:
         return connection.execute(
-            "SELECT username, role FROM accounts WHERE role = 'Cashier' ORDER BY username"
+            "SELECT username, role, employee_code FROM accounts WHERE role = 'Cashier' ORDER BY username"
         ).fetchall()
 
 
 def get_manager_accounts():
     with sqlite3.connect(ACCOUNT_DB) as connection:
         return connection.execute(
-            "SELECT username, role FROM accounts WHERE role = 'Store Manager' ORDER BY username"
+            "SELECT username, role, employee_code FROM accounts WHERE role = 'Store Manager' ORDER BY username"
         ).fetchall()
 
 
@@ -378,14 +414,21 @@ def create_cashier_account(username: str, password: str, confirm_password: str):
             return False, "That username is already in use."
 
         salt, password_hash = hash_password(password)
+        employee_code = create_employee_code(connection, "Cashier")
         connection.execute(
             """
-            INSERT INTO accounts (username, password_hash, salt, role, access)
-            VALUES (?, ?, ?, 'Cashier', ?)
+            INSERT INTO accounts (username, password_hash, salt, role, access, employee_code)
+            VALUES (?, ?, ?, 'Cashier', ?, ?)
             """,
-            (cleaned_username, password_hash, salt, json.dumps(["🏠 Dashboard", "🛒 POS", "📊 Sales"])),
+            (
+                cleaned_username,
+                password_hash,
+                salt,
+                json.dumps(["🏠 Dashboard", "🛒 POS", "📊 Sales"]),
+                employee_code,
+            ),
         )
-    return True, cleaned_username
+    return True, f"{cleaned_username} (Employee code: {employee_code})"
 
 
 def create_manager_account(username: str, password: str, confirm_password: str):
@@ -406,22 +449,29 @@ def create_manager_account(username: str, password: str, confirm_password: str):
             return False, "That username is already in use."
 
         salt, password_hash = hash_password(password)
+        employee_code = create_employee_code(connection, "Store Manager")
         connection.execute(
             """
-            INSERT INTO accounts (username, password_hash, salt, role, access)
-            VALUES (?, ?, ?, 'Store Manager', ?)
+            INSERT INTO accounts (username, password_hash, salt, role, access, employee_code)
+            VALUES (?, ?, ?, 'Store Manager', ?, ?)
             """,
-            (cleaned_username, password_hash, salt, json.dumps([
-                "🏠 Dashboard",
-                "🛒 POS",
-                "📦 Products",
-                "📊 Sales",
-                "🤖 AI Manager",
-                "👥 Cashier Management",
-                "➕ Add Cashier",
-            ])),
+            (
+                cleaned_username,
+                password_hash,
+                salt,
+                json.dumps([
+                    "🏠 Dashboard",
+                    "🛒 POS",
+                    "📦 Products",
+                    "📊 Sales",
+                    "🤖 AI Manager",
+                    "👥 Cashier Management",
+                    "➕ Add Cashier",
+                ]),
+                employee_code,
+            ),
         )
-    return True, cleaned_username
+    return True, f"{cleaned_username} (Employee code: {employee_code})"
 
 
 def update_cashier_credentials(current_username: str, new_username: str, new_password: str):
@@ -648,13 +698,14 @@ def authenticate_user(username: str, password: str):
     account = get_account(cleaned_username)
     if not account:
         return None
-    username, password_hash, salt, role, access_json = account
+        username, password_hash, salt, role, access_json, employee_code = account
     if not verify_password(password or "", salt, password_hash):
         return None
     return {
         "username": username,
         "role": role,
         "access": json.loads(access_json),
+            "employee_code": employee_code,
     }
 
 
@@ -1139,7 +1190,7 @@ if not st.session_state.authenticated:
     st.markdown("<br>", unsafe_allow_html=True)
 
     with st.form("login_form"):
-        username = st.text_input("Username")
+        username = st.text_input("Username or employee code")
         password = st.text_input("Password", type="password")
         submitted = st.form_submit_button("Sign In")
 
@@ -1148,6 +1199,7 @@ if not st.session_state.authenticated:
             if user:
                 st.session_state.authenticated = True
                 st.session_state.username = user["username"]
+                st.session_state.employee_code = user["employee_code"]
                 st.session_state.user_role = user["role"]
                 st.session_state.user_access = user["access"]
                 st.session_state.login_error = ""
@@ -1183,6 +1235,8 @@ else:
 st.sidebar.markdown("<div style='text-align:center; color:#d8b36a; letter-spacing:0.18em; font-size:0.72rem; text-transform:uppercase; margin-top:8px; margin-bottom:16px;'>AI Retail Command</div>", unsafe_allow_html=True)
 st.sidebar.write(f"Signed in as: **{st.session_state.username or 'User'}**")
 st.sidebar.write(f"Role: **{st.session_state.user_role or 'User'}**")
+if st.session_state.get("employee_code"):
+    st.sidebar.write(f"Employee code: **{st.session_state.employee_code}**")
 
 with st.sidebar.expander("Settings"):
     st.session_state.keyboard_shortcuts_enabled = st.checkbox(
@@ -1266,6 +1320,7 @@ if st.session_state.get("user_role") in ("Administrator", "Store Manager"):
 if st.sidebar.button("Logout"):
     st.session_state.authenticated = False
     st.session_state.username = ""
+    st.session_state.employee_code = ""
     st.session_state.user_role = ""
     st.session_state.user_access = []
     st.session_state.login_error = ""
@@ -1881,8 +1936,12 @@ elif page == "👥 Cashier Management":
     if not cashier_accounts:
         st.info("No cashier accounts are configured.")
     else:
-        cashier_names = [account[0] for account in cashier_accounts]
-        selected_cashier = st.selectbox("Select cashier", cashier_names)
+        cashier_options = {
+            f"{account[0]} ({account[2]})": account[0]
+            for account in cashier_accounts
+        }
+        selected_cashier_label = st.selectbox("Select cashier", list(cashier_options))
+        selected_cashier = cashier_options[selected_cashier_label]
         cashier_data = get_cashier_data(selected_cashier)
         products = cashier_data["products"]
         sales = cashier_data["sales"]
